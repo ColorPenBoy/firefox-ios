@@ -5,90 +5,119 @@
 import Foundation
 import FxA
 
-/// Class to wrap ece.c which does the decryption with OpenSSL.
-/// This supports aes128gcm and aesgcm.
+/// Class to wrap ecec which does the decryption with OpenSSL.
+/// This supports aesgcm and the newer aes128gcm.
 /// This will also support the generation of keys to register with a push server.
+/// For each standard of decryption, two methods are supplied: one with Data parameters and return value, 
+/// and one with a String based one.
 class PushDecrypt {
+    // stateless
+}
+
+// AES128GCM
+extension PushDecrypt {
     func aes128gcm(payload data: String, decryptWith privateKey: String, authenticateWith authKey: String) throws -> String {
-        var authSecret = try stringToBuffer(authKey)
-        var rawRecvPrivKey = try stringToBuffer(privateKey)
-        var plaintext = emptyBuffer()
-        var payload = try stringToBuffer(data)
-
-        defer {
-            ece_buf_free(&authSecret)
-            ece_buf_free(&rawRecvPrivKey)
-            ece_buf_free(&payload)
-            ece_buf_free(&plaintext)
+        guard let authSecret = authKey.base64DecodedData,
+            let rawRecvPrivKey = privateKey.base64DecodedData,
+            let payload = data.base64DecodedData else {
+                throw PushDecryptError.base64DecodeError
         }
 
-        let err =
-            ece_aes128gcm_decrypt(&rawRecvPrivKey, &authSecret, &payload, &plaintext)
-        if (err != 0) {
-            throw PushDecryptError.cantDecrypt
+        let decrypted = try aes128gcm(payload: payload,
+                             decryptWith: rawRecvPrivKey,
+                             authenticateWith: authSecret)
+
+        guard let plaintext = decrypted.utf8EncodedString else {
+            throw PushDecryptError.utf8EncodingError
         }
-        
-        return try bufferToString(plaintext)
+
+        return plaintext
     }
 
-    func aesgcm(ciphertext data: String, decryptWith privateKey: String, authenticateWith authKey: String, encryptionHeader: String, cryptoKeyHeader: String) throws -> String {
+    func aes128gcm(payload: Data, decryptWith rawRecvPrivKey: Data, authenticateWith authSecret: Data) throws -> Data {
+        var plaintextLen = ece_aes128gcm_plaintext_max_length(payload.getBytes(), payload.count) + 1
+        var plaintext = [UInt8](repeating: 0, count: plaintextLen)
 
-        var authSecret = try stringToBuffer(authKey)
-        var rawRecvPrivKey = try stringToBuffer(privateKey)
-        var plaintext = emptyBuffer()
-        var ciphertext = try stringToBuffer(data)
+        let err = ece_webpush_aes128gcm_decrypt(
+                rawRecvPrivKey.getBytes(), rawRecvPrivKey.count,
+                authSecret.getBytes(), authSecret.count,
+                payload.getBytes(), payload.count,
+                &plaintext, &plaintextLen)
 
-        defer {
-            ece_buf_free(&authSecret)
-            ece_buf_free(&rawRecvPrivKey)
-            ece_buf_free(&ciphertext)
-            ece_buf_free(&plaintext)
+        if err != 0 {
+            throw PushDecryptError.decryptionError(errCode: Int(err))
         }
-
-        let err = ece_aesgcm_decrypt(&rawRecvPrivKey, &authSecret, cryptoKeyHeader,
-                           encryptionHeader, &ciphertext, &plaintext)
-        if (err != 0) {
-            throw PushDecryptError.cantDecrypt
-        }
-
-        return try bufferToString(plaintext)
+        
+        return Data(bytes: plaintext, count: plaintextLen)
     }
 }
 
-/// Some utility methods that make package up dealing with the C API a little easier.
+// AESGCM
 extension PushDecrypt {
-    func emptyBuffer() -> ece_buf_t {
-        var bytes = [UInt8]()
-        return ece_buf_t(bytes: &bytes, length: 0)
-    }
-
-    /// Converts a Swift string into a ece_buf_t. It assumes that the String is base64 encoded.
-    func stringToBuffer(_ string: String) throws -> ece_buf_t {
-        var cstring = [UInt8](string.utf8).map { Int8($0) }
-        var buffer = emptyBuffer()
-        // Using ece_base64url_decode with REJECT_PADDING
-        // is a quicker way to get to ece_buf_t than using Data(base64Encoded:,options:)
-        ece_base64url_decode(&cstring, cstring.count, ECE_BASE64URL_REJECT_PADDING, &buffer)
-
-        return buffer
-    }
-
-    func bufferToString(_ buffer: ece_buf_t) throws -> String {
-        guard let bytes = buffer.bytes else {
-            throw PushDecryptError.zeroBytes
+    func aesgcm(ciphertext data: String, decryptWith privateKey: String, authenticateWith authKey: String, encryptionHeader: String, cryptoKeyHeader: String) throws -> String {
+        guard let authSecret = authKey.base64DecodedData,
+            let rawRecvPrivKey = privateKey.base64DecodedData,
+            let ciphertext = data.base64DecodedData else {
+                throw PushDecryptError.base64DecodeError
         }
-        let data = Data(bytes: bytes, count: buffer.length)
-        return data.utf8EncodedString!
+
+        let decrypted = try aesgcm(ciphertext: ciphertext,
+                          decryptWith: rawRecvPrivKey,
+                          authenticateWith: authSecret,
+                          encryptionHeader: encryptionHeader,
+                          cryptoKeyHeader: cryptoKeyHeader)
+
+        guard let plaintext = decrypted.utf8EncodedString else {
+            throw PushDecryptError.utf8EncodingError
+        }
+
+        return plaintext
     }
 
-    func dataToBuffer(_ data: Data) -> ece_buf_t {
-        var bytes = data.getBytes()
-        return ece_buf_t(bytes: &bytes, length: bytes.count)
+    func aesgcm(ciphertext: Data, decryptWith rawRecvPrivKey: Data, authenticateWith authSecret: Data, encryptionHeader: String, cryptoKeyHeader: String) throws -> Data {
+        var plaintextLen = ece_aesgcm_plaintext_max_length(ciphertext.count) + 1
+        var plaintext = [UInt8](repeating: 0, count: plaintextLen)
+
+        let err = ece_webpush_aesgcm_decrypt(
+                rawRecvPrivKey.getBytes(), rawRecvPrivKey.count,
+                authSecret.getBytes(), authSecret.count,
+                cryptoKeyHeader, encryptionHeader,
+                ciphertext.getBytes(), ciphertext.count,
+                &plaintext, &plaintextLen)
+
+        if (err != 0) {
+            throw PushDecryptError.decryptionError(errCode: Int(err))
+        }
+
+        return Data(bytes: plaintext, count: plaintextLen)
     }
 }
 
 enum PushDecryptError: Error {
-    case cantBase64Decode
-    case cantDecrypt
-    case zeroBytes
+    case base64DecodeError
+    case decryptionError(errCode: Int)
+    case utf8EncodingError
+}
+
+extension String {
+    /// Returns a base64 decoding of the given string.
+    /// The string is allowed to be padded (unlike using Data(base64Encoded:,options:))
+    /// What is padding?: http://stackoverflow.com/a/26632221
+    var base64DecodedData: Data? {
+        // We call this method twice: once with the last two args as nil, 0 – this gets us the length
+        // of the decoded string.
+        let length = ece_base64url_decode(self, self.characters.count, ECE_BASE64URL_REJECT_PADDING, nil, 0)
+        guard length > 0 else {
+            return nil
+        }
+
+        // The second time, we actually decode, and copy it into a made to measure byte array.
+        var bytes = [UInt8](repeating: 0, count: length)
+        let checkLength = ece_base64url_decode(self, self.characters.count, ECE_BASE64URL_REJECT_PADDING, &bytes, length)
+        guard checkLength == length else {
+            return nil
+        }
+
+        return Data(bytes: bytes, count: length)
+    }
 }

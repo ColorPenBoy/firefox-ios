@@ -10,26 +10,29 @@ class PushDecryptTests: XCTestCase {
 
     let push = PushDecrypt()
 
-    func testStringToBuffer() {
-        guard let buffer = try? push.stringToBuffer("SSBhbSB0aGUgd2FscnVz") else {
-            return XCTFail("stringToBuffer failed")
+    func testBase64StringDecodedData() {
+        let ogString = "I am the walrus"
+        let encoded = ogString.data(using: .utf8)!.base64EncodedString
+
+        guard let data = encoded.base64DecodedData else {
+            return XCTFail("base64DecodedData failed")
         }
 
-        guard let string = try? push.bufferToString(buffer) else {
+        guard let string = data.utf8EncodedString else {
             return XCTFail("bufferToString failed")
         }
 
-        XCTAssertEqual(string, "I am the walrus")
+        XCTAssertEqual(string, ogString)
+    }
+
+    struct Aes128GcmTest {
+        let payload: String
+        let recvPrivKey: String
+        let authSecret: String
+        let plaintext: String
     }
 
     func testDecrypt_aes128gcm() {
-        struct Aes128GcmTest {
-            let payload: String
-            let recvPrivKey: String
-            let authSecret: String
-            let plaintext: String
-        }
-
         let tests = [
             Aes128GcmTest(
                 payload: "SVzmyN6TpFOehi6GNJk8uwAAABhBBDwzeKLAq5VOFJhxjoXwi7cj-30l4TWmY_44WITrgZIza_kKVO1yDxwEXAtAXpu8OiFCsWyJCGc0w3Trr3CZ5kJ-LTLIraUBhwPFSxC0geECfXIJ2Ma0NVP6Ezr6WX8t3EWluoFAlE5kkLuNbZm6HQLmDZX0jOZER3wXIx2VuXpPld0",
@@ -56,16 +59,52 @@ class PushDecryptTests: XCTestCase {
         }
     }
 
-    func testDecrypt_aesgcm() {
-        struct AesGcmTest {
-            let plaintext: String
-            let recvPrivKey: String
-            let authSecret: String
-            let ciphertext: String
-            let cryptoKey: String
-            let encryption: String
+    func testFail_aes128gcm() {
+        let tests = [
+            Aes128GcmTest(
+                payload: "bad base 64 encoding",
+                recvPrivKey: "yJnRHTLit-b-dJh4b1DyO5is5Tl60mHeObpkSezBLK0",
+                authSecret: "mW-ti1CqLQK4PyZBKy4q7g",
+                plaintext: "bad base64"
+            ),
+            Aes128GcmTest(
+                payload: "DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN",
+                recvPrivKey: "badkey",
+                authSecret: "BTBZMqHH6r4Tts7J_aSIgg",
+                plaintext: "bad key"
+            ),
+        ]
+
+        for test in tests {
+            do {
+                let _ = try push.aes128gcm(payload: test.payload,
+                                           decryptWith: test.recvPrivKey,
+                                           authenticateWith: test.authSecret)
+
+                XCTFail("Somehow, deciphered \(test.plaintext)")
+            } catch PushDecryptError.base64DecodeError {
+                XCTAssertEqual(test.plaintext, tests[0].plaintext)
+            } catch PushDecryptError.decryptionError(_) {
+                XCTAssertEqual(test.plaintext, tests[1].plaintext)
+            } catch PushDecryptError.utf8EncodingError {
+                XCTFail("Not tested")
+            } catch {
+                XCTFail("Not tested but found \(error)")
+            }
         }
 
+    }
+
+    struct AesGcmTest {
+        let plaintext: String
+        let recvPrivKey: String
+        let authSecret: String
+        let ciphertext: String
+        let cryptoKey: String
+        let encryption: String
+    }
+
+    func testDecrypt_aesgcm() {
         let tests = [
             AesGcmTest(
                 plaintext: "I am the walrus",
@@ -111,8 +150,48 @@ class PushDecryptTests: XCTestCase {
             } else {
                 XCTFail("Failed to decipher \(test.plaintext)")
             }
-
         }
     }
 
+    func testFail_aesgcm() {
+        let tests = [
+            AesGcmTest(
+                plaintext: "bad base64",
+                recvPrivKey: "4h23G_KkXC9TvBSK2v0Q7ImpS2YAuRd8hQyN0rFAwBg",
+                authSecret: "aTDc6JebzR6eScy2oLo4RQ",
+                ciphertext: "non base64",
+                cryptoKey: "dh=BCHFVrflyxibGLlgztLwKelsRZp4gqX3tNfAKFaxAcBhpvYeN1yIUMrxaDKiLh4LNKPtj0BOXGdr-IQ-QP82Wjo",
+                encryption: "salt=zCU18Rw3A5aB_Xi-vfixmA; rs=24"
+            ),
+
+            AesGcmTest(
+                plaintext: "bad key",
+                recvPrivKey: "badkey",
+                authSecret: "aTDc6JebzR6eScy2oLo4RQ",
+                ciphertext: "Oo34w2F9VVnTMFfKtdx48AZWQ9Li9M6DauWJVgXU",
+                cryptoKey: "dh=BCHFVrflyxibGLlgztLwKelsRZp4gqX3tNfAKFaxAcBhpvYeN1yIUMrxaDKiLh4LNKPtj0BOXGdr-IQ-QP82Wjo",
+                encryption: "salt=zCU18Rw3A5aB_Xi-vfixmA; rs=24"
+            ),
+        ]
+
+        for test in tests {
+            do {
+                let _ = try push.aesgcm(ciphertext: test.ciphertext,
+                                 decryptWith: test.recvPrivKey,
+                                 authenticateWith: test.authSecret,
+                                 encryptionHeader: test.encryption,
+                                 cryptoKeyHeader: test.cryptoKey)
+
+                XCTFail("Somehow, deciphered \(test.plaintext)")
+            } catch PushDecryptError.base64DecodeError {
+                XCTAssertEqual(test.plaintext, tests[0].plaintext)
+            } catch PushDecryptError.decryptionError(_) {
+                XCTAssertEqual(test.plaintext, tests[1].plaintext)
+            } catch PushDecryptError.utf8EncodingError {
+                XCTFail("Not tested")
+            } catch {
+                XCTFail("Not tested but found \(error)")
+            }
+        }
+    }
 }
