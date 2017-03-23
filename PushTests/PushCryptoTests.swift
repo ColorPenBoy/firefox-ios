@@ -6,16 +6,16 @@
 import XCTest
 
 
-class PushDecryptTests: XCTestCase {
+class PushCryptoTests: XCTestCase {
 
-    let push = PushDecrypt()
+    let push = PushCrypto()
 
     func testBase64StringDecodedData() {
         let ogString = "I am the walrus"
         let encoded = ogString.data(using: .utf8)!.base64EncodedString
 
-        guard let data = encoded.base64DecodedData else {
-            return XCTFail("base64DecodedData failed")
+        guard let data = encoded.base64urlSafeDecodedData else {
+            return XCTFail("base64urlSafeDecodedData failed")
         }
 
         guard let string = data.utf8EncodedString else {
@@ -23,6 +23,12 @@ class PushDecryptTests: XCTestCase {
         }
 
         XCTAssertEqual(string, ogString)
+    }
+
+    func testBase64urlSafeEncoding() {
+        let encoded = "mW-ti1CqLQK4PyZBKy4q7g"
+
+        XCTAssertEqual(encoded.base64urlSafeDecodedData!.base64urlSafeEncodedString, encoded)
     }
 
     struct Aes128GcmTest {
@@ -82,17 +88,34 @@ class PushDecryptTests: XCTestCase {
                                            authenticateWith: test.authSecret)
 
                 XCTFail("Somehow, deciphered \(test.plaintext)")
-            } catch PushDecryptError.base64DecodeError {
+            } catch PushCryptoError.base64DecodeError {
                 XCTAssertEqual(test.plaintext, tests[0].plaintext)
-            } catch PushDecryptError.decryptionError(_) {
+            } catch PushCryptoError.decryptionError(_) {
                 XCTAssertEqual(test.plaintext, tests[1].plaintext)
-            } catch PushDecryptError.utf8EncodingError {
+            } catch PushCryptoError.utf8EncodingError {
                 XCTFail("Not tested")
             } catch {
                 XCTFail("Not tested but found \(error)")
             }
         }
+    }
 
+    func testRoundTrip_aes128gcm() {
+        guard let keys = push.generateKeys() else {
+            return XCTFail("Generating keys should not fail")
+        }
+
+        let plaintext = "I am the egg man!"
+
+        guard let payload = try? push.aes128gcm(plaintext: plaintext, encryptWith: keys.p256dhPublicKey, authenticateWith: keys.auth, rs: 1024, padLen: 2) else {
+            return XCTFail("Encryption should not fail")
+        }
+
+        guard let deciphered = try? push.aes128gcm(payload: payload, decryptWith: keys.p256dhPrivateKey, authenticateWith: keys.auth) else {
+            return XCTFail("Decryption should not fail")
+        }
+
+        XCTAssertEqual(deciphered, plaintext)
     }
 
     struct AesGcmTest {
@@ -183,15 +206,26 @@ class PushDecryptTests: XCTestCase {
                                  cryptoKeyHeader: test.cryptoKey)
 
                 XCTFail("Somehow, deciphered \(test.plaintext)")
-            } catch PushDecryptError.base64DecodeError {
+            } catch PushCryptoError.base64DecodeError {
                 XCTAssertEqual(test.plaintext, tests[0].plaintext)
-            } catch PushDecryptError.decryptionError(_) {
+            } catch PushCryptoError.decryptionError(_) {
                 XCTAssertEqual(test.plaintext, tests[1].plaintext)
-            } catch PushDecryptError.utf8EncodingError {
+            } catch PushCryptoError.utf8EncodingError {
                 XCTFail("Not tested")
             } catch {
                 XCTFail("Not tested but found \(error)")
             }
+        }
+    }
+
+    func testKeyGeneration() {
+        guard let keys = push.generateKeys() else {
+            return XCTFail("Keys can't be tested")
+        }
+        // We can't really test if the keys are random enough, but we can check if they 
+        // roundtrip with the base64urlSafe encoding. 
+        for string in [keys.p256dhPublicKey, keys.p256dhPrivateKey, keys.auth] {
+            XCTAssertEqual(string.base64urlSafeDecodedData?.base64urlSafeEncodedString, string)
         }
     }
 }
